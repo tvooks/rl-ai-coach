@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import json
+import time
 from google import genai
 
 # --- PAGE SETUP ---
@@ -16,10 +17,10 @@ st.sidebar.markdown("---")
 player_rank = st.sidebar.selectbox("Select Your Current Rank", ["Gold/Platinum", "Diamond", "Champion 1 - 2", "Champion 3 / GC1", "GC2+"])
 target_player = st.sidebar.text_input("Player Name to Analyze (Optional)", help="Leave blank to analyze all players or enter your specific in-game name.")
 
-# --- AI GENERATION FUNCTION ---
+# --- AI GENERATION FUNCTION WITH RETRY & FALLBACK LOGIC ---
 
 def generate_csv_coaching_report(df, rank, target_name, api_key):
-    """Converts CSV data into structured text and sends it to Gemini."""
+    """Converts CSV data into structured text and sends it to Gemini with automated fallback logic."""
     client = genai.Client(api_key=api_key)
     
     # Convert CSV dataframe to dict/JSON for clean prompt insertion
@@ -41,11 +42,29 @@ def generate_csv_coaching_report(df, rank, target_name, api_key):
     4. **Recommended Training & Workshop Maps:** Suggest 2 specific Workshop maps or custom training pack concepts (e.g., 'Hornets Audio Pack' for saves, 'CoCo's Aim Training', dribbling/shadow defense maps) tailored to these weaknesses.
     """
     
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt
-    )
-    return response.text
+    # List of models to try in order if Google servers experience high demand
+    models_to_try = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-flash"
+    ]
+    
+    last_error = None
+    
+    # Loop through models with backoff retry logic
+    for model_name in models_to_try:
+        for attempt in range(2):  # Try each model up to twice
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                return response.text
+            except Exception as e:
+                last_error = e
+                time.sleep(2)  # Pause briefly before retrying or switching models
+                
+    raise last_error
 
 
 # --- MAIN UI FLOW ---
@@ -53,7 +72,6 @@ def generate_csv_coaching_report(df, rank, target_name, api_key):
 uploaded_csv = st.file_uploader("Drop your Ballchasing `.csv` report file here", type=["csv"])
 
 if uploaded_csv is not None:
-    # Read the CSV into a Pandas DataFrame
     try:
         df = pd.read_csv(uploaded_csv)
         st.success(f"Successfully loaded CSV: **{uploaded_csv.name}** ({len(df)} rows)")

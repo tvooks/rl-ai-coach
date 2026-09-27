@@ -2,12 +2,15 @@ import streamlit as st
 import pandas as pd
 import json
 import time
+import tempfile
+import os
 from google import genai
+from google.genai import types
 
 # --- PAGE SETUP ---
-st.set_page_config(page_title="Rocket League CSV AI Coach", page_icon="⚽", layout="centered")
-st.title("⚽ Rocket League CSV AI Coach")
-st.write("Upload a match CSV report exported from Ballchasing.com to generate AI coaching advice.")
+st.set_page_config(page_title="Rocket League Hybrid AI Coach", page_icon="⚽", layout="wide")
+st.title("⚽ Rocket League Hybrid AI Coach")
+st.write("Upload your gameplay video and Ballchasing CSV for a complete tactical and statistical breakdown.")
 
 # --- SIDEBAR: CONFIGURATION ---
 st.sidebar.header("🔑 API Credentials & Setup")
@@ -17,77 +20,117 @@ st.sidebar.markdown("---")
 player_rank = st.sidebar.selectbox("Select Your Current Rank", ["Gold/Platinum", "Diamond", "Champion 1 - 2", "Champion 3 / GC1", "GC2+"])
 target_player = st.sidebar.text_input("Player Name to Analyze (Optional)", help="Leave blank to analyze all players or enter your specific in-game name.")
 
-# --- AI GENERATION FUNCTION WITH RETRY & FALLBACK LOGIC ---
+# --- AI GENERATION FUNCTION ---
 
-def generate_csv_coaching_report(df, rank, target_name, api_key):
-    """Converts CSV data into structured text and sends it to Gemini with automated fallback logic."""
+def generate_hybrid_coaching_report(df, video_file_path, rank, target_name, api_key):
     client = genai.Client(api_key=api_key)
     
-    # Convert CSV dataframe to dict/JSON for clean prompt insertion
-    csv_json_data = df.to_dict(orient="records")
+    # 1. Prepare the CSV Data
+    csv_json_data = df.to_dict(orient="records") if df is not None else "No CSV provided."
+    player_focus = f"Focus particularly on the player named '{target_name}'." if target_name else "Analyze the main player's POV."
     
-    player_focus = f"Focus particularly on the player named '{target_name}'." if target_name else "Analyze all players on the team."
-    
+    # 2. Upload Video to Gemini
+    video_gemini_file = None
+    if video_file_path:
+        with st.spinner("Uploading video to Gemini's vision engine... this may take a minute."):
+            video_gemini_file = client.files.upload(file=video_file_path)
+            
+            # Wait for Google to process the video frames
+            while video_gemini_file.state.name == "PROCESSING":
+                time.sleep(3)
+                video_gemini_file = client.files.get(name=video_gemini_file.name)
+                
+            if video_gemini_file.state.name == "FAILED":
+                st.error("Video processing failed on Google's servers.")
+                return None
+
+    # 3. Master Prompt (We will expand this later with your specific notes)
     prompt = f"""
-    You are an elite Rocket League Coach. Analyze the following match telemetry CSV data exported from Ballchasing.com for a game played at the '{rank}' rank level.
+    You are an elite Rocket League Coach evaluating a {rank} player. 
     {player_focus}
     
-    CSV Telemetry Data:
-    {json.dumps(csv_json_data, indent=2)}
+    You have been provided with:
+    1. A gameplay video of the match.
+    2. Telemetry CSV data from Ballchasing.
+    
+    CSV Data:
+    {json.dumps(csv_json_data, indent=2) if df is not None else "None"}
 
-    Provide a structured coaching report following this format:
-    1. **Overview & Match Pace:** How fast was the game played compared to benchmark expectations for {rank}?
-    2. **Boost Efficiency & Positioning Breakdown:** Identify high time spent at 0 boost, boost wasted/stolen, or passive defensive time.
-    3. **Key Weaknesses Identified:** List 2-3 critical operational mistakes found in the numbers.
-    4. **Recommended Training & Workshop Maps:** Suggest 2 specific Workshop maps or custom training pack concepts (e.g., 'Hornets Audio Pack' for saves, 'CoCo's Aim Training', dribbling/shadow defense maps) tailored to these weaknesses.
+    Watch the video closely and cross-reference it with the CSV data (if available). Provide a structured coaching report following this format:
+    
+    1. **The Brutal Truth:** What is the primary reason this player is stuck in {rank}?
+    2. **Tactical Review (Video Analysis):** Point out specific overcommits, poor spacing, or bad challenges you observed. Give timestamps if possible.
+    3. **Mechanical Review (Video Analysis):** Evaluate their mechanics. Are they attempting things outside their capability (e.g., flip resets, bad aerials)? What should they stop doing?
+    4. **Efficiency Review (CSV Analysis):** Note boost wastage, time at 0 boost, or slow rotational speed based on the stats.
+    5. **The Training Regimen:** Suggest 2-3 specific workshop maps or custom training packs tailored directly to fixing the mistakes you observed in the video.
     """
     
-    # List of models to try in order if Google servers experience high demand
-    models_to_try = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-3.8-flash"
-    ]
-    
+    # 4. Generate Content (Fallback logic included)
+    contents_to_send = [prompt]
+    if video_gemini_file:
+        contents_to_send.append(video_gemini_file)
+        
+    models_to_try = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
     last_error = None
     
-    # Loop through models with backoff retry logic
     for model_name in models_to_try:
-        for attempt in range(2):  # Try each model up to twice
+        for attempt in range(2):
             try:
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=prompt
+                    contents=contents_to_send
                 )
                 return response.text
             except Exception as e:
                 last_error = e
-                time.sleep(2)  # Pause briefly before retrying or switching models
+                time.sleep(2)
                 
     raise last_error
 
 
 # --- MAIN UI FLOW ---
 
-uploaded_csv = st.file_uploader("Drop your Ballchasing `.csv` report file here", type=["csv"])
+col1, col2 = st.columns(2)
 
-if uploaded_csv is not None:
-    try:
-        df = pd.read_csv(uploaded_csv)
-        st.success(f"Successfully loaded CSV: **{uploaded_csv.name}** ({len(df)} rows)")
-        
-        with st.expander("📊 View Uploaded CSV Table"):
-            st.dataframe(df)
+with col1:
+    st.subheader("1. Upload Video (POV)")
+    uploaded_video = st.file_uploader("Drop your MP4/MOV screen recording here", type=["mp4", "mov"])
+
+with col2:
+    st.subheader("2. Upload Stats (CSV)")
+    uploaded_csv = st.file_uploader("Drop your Ballchasing `.csv` file here", type=["csv"])
+
+if st.button("🚀 Analyze Hybrid Match Data", type="primary", use_container_width=True):
+    if not gemini_api_key:
+        st.warning("Please enter your Gemini API Key in the sidebar.")
+    elif not uploaded_video and not uploaded_csv:
+        st.warning("Please upload at least a video or a CSV file.")
+    else:
+        # Load CSV if available
+        df = None
+        if uploaded_csv:
+            df = pd.read_csv(uploaded_csv)
             
-        if st.button("🚀 Analyze CSV Match Data", type="primary"):
-            if not gemini_api_key:
-                st.warning("Please enter your Gemini API Key in the sidebar or save it in Streamlit Secrets.")
-            else:
-                with st.spinner("Analyzing CSV telemetry with Gemini AI..."):
-                    report = generate_csv_coaching_report(df, player_rank, target_player, gemini_api_key)
-                    
-                st.subheader("📋 Coaching Report")
+        # Handle Video temp storage
+        video_path = None
+        if uploaded_video:
+            # Save the uploaded file to a temporary location so Gemini can upload it
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
+                temp_video.write(uploaded_video.read())
+                video_path = temp_video.name
+                
+        try:
+            with st.spinner("Analyzing Match... (This takes a few moments for video)"):
+                report = generate_hybrid_coaching_report(df, video_path, player_rank, target_player, gemini_api_key)
+                
+            if report:
+                st.subheader("📋 Hybrid Coaching Report")
                 st.markdown(report)
                 
-    except Exception as e:
-        st.error(f"Error reading CSV file: {e}")
+        except Exception as e:
+            st.error(f"Error generating report: {e}")
+            
+        finally:
+            # Clean up the temporary video file from the server
+            if video_path and os.path.exists(video_path):
+                os.remove(video_path)

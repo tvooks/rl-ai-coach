@@ -1,72 +1,87 @@
 import streamlit as st
-import requests
+import boxcars
 import json
-import time
 from google import genai
 
-st.set_page_config(page_title="Rocket League One-Click AI Coach", page_icon="⚽")
-st.title("⚽ Rocket League One-Click AI Coach")
+# --- PAGE SETUP ---
+st.set_page_config(page_title="Rocket League 1-Click AI Coach", page_icon="⚽", layout="centered")
+st.title("⚽ Rocket League 1-Click AI Coach")
+st.write("Upload a raw `.replay` file directly from your game folder for instant AI coaching.")
 
-ballchasing_token = st.secrets.get("BALLCHASING_TOKEN") or st.sidebar.text_input("Ballchasing API Token", type="password")
-gemini_api_key = st.secrets.get("GEMINI_API_KEY") or st.sidebar.text_input("Gemini API Key", type="password")
-player_rank = st.sidebar.selectbox("Current Rank", ["Diamond 3", "Champion 1-2", "Champion 3 / GC1", "GC2+"])
+# --- SIDEBAR: CONFIGURATION ---
+st.sidebar.header("🔑 API Credentials & Setup")
+gemini_api_key = st.secrets.get("GEMINI_API_KEY") or st.sidebar.text_input("Gemini API Key", type="password", help="Get your key at aistudio.google.com")
 
-def process_replay_and_analyze(replay_bytes, filename, rank, bc_token, gemini_key):
-    # Step 1: Upload raw .replay file to Ballchasing API
-    upload_url = "https://ballchasing.com/api/v2/upload"
-    headers = {"Authorization": bc_token}
-    files = {"file": (filename, replay_bytes)}
-    
-    st.info("Uploading .replay file to telemetry parser...")
-    response = requests.post(upload_url, headers=headers, files=files)
-    
-    if response.status_code == 201:
-        replay_id = response.json()["id"]
-    elif response.status_code == 409: # Replay already exists on Ballchasing
-        replay_id = response.json()["id"]
-    else:
-        st.error(f"Failed to process replay: {response.text}")
+st.sidebar.markdown("---")
+player_rank = st.sidebar.selectbox("Select Your Current Rank", ["Gold/Platinum", "Diamond", "Champion 1 - 2", "Champion 3 / GC1", "GC2+", "SSL / 2000+ MMR"])
+target_player = st.sidebar.text_input("Your In-Game Name", help="Enter your exact in-game name so the AI knows which player to coach.")
+
+# --- LOCAL REPLAY PARSER FUNCTION ---
+
+def parse_replay_locally(file_bytes):
+    """Parses raw binary .replay bytes directly in Python without any external API."""
+    try:
+        # boxcars parses header and frame data directly in memory
+        parsed_data = boxcars.parse_replay(file_bytes)
+        return json.loads(parsed_data)
+    except Exception as e:
+        st.error(f"Error parsing replay file: {e}")
         return None
 
-    # Step 2: Fetch detailed telemetry JSON from Ballchasing
-    st.info("Extracting match telemetry...")
-    time.sleep(2) # Give Ballchasing a moment to calculate stats
-    stats_url = f"https://ballchasing.com/api/replays/{replay_id}"
-    stats_response = requests.get(stats_url, headers=headers)
-    telemetry_data = stats_response.json()
+# --- AI COACHING GENERATION ---
 
-    # Step 3: Send parsed telemetry straight to Gemini AI
-    st.info("Generating AI Coaching Report...")
-    client = genai.Client(api_key=gemini_key)
+def generate_coaching_report(telemetry_data, rank, target_name, api_key):
+    client = genai.Client(api_key=api_key)
+    
+    # Extract header properties (goals, players, stats)
+    header_properties = telemetry_data.get("header", {}).get("body", {}).get("properties", {})
+    
+    player_focus = f"Focus particularly on analyzing the player named '{target_name}'." if target_name else "Analyze the main players in the lobby."
     
     prompt = f"""
-    You are an elite Rocket League Coach. Analyze this raw match telemetry JSON for a {rank} player.
+    You are an elite Rocket League Coach evaluating a {rank} player.
+    {player_focus}
     
-    Match Data:
-    {json.dumps(telemetry_data, indent=2)}
+    Below is the extracted match telemetry and header data from the raw `.replay` file:
+    {json.dumps(header_properties, indent=2)}
 
-    Provide a structured coaching report:
+    Provide a structured coaching report following this format:
     1. **Primary Mistake Holding Them Back:** What is keeping them stuck in {rank}?
-    2. **Positional & Rotational Breakdown:** Evaluate time spent in defensive third, supersonic speed ratio, and overcommits.
-    3. **Boost Efficiency:** Detail boost wasted, stolen, and zero-boost duration.
-    4. **Custom Workshop Map & Training Plan:** Recommend 2 specific Workshop maps or training packs for this rank.
+    2. **Positional & Rotational Breakdown:** Evaluate key game stats, goals conceded, and team dynamics.
+    3. **Boost & Pace Efficiency:** Identify area of improvement regarding match speed and resource control.
+    4. **Custom Training Plan & Workshop Maps:** Recommend 2-3 specific workshop maps or custom training pack concepts suitable for {rank}.
     """
+    
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+    
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            return response.text
+        except Exception:
+            continue
+            
+    raise Exception("Could not connect to Gemini AI models.")
 
-    ai_response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt
-    )
-    return ai_response.text
+# --- MAIN UI FLOW ---
 
-# --- UI LOGIC ---
 uploaded_replay = st.file_uploader("Drop your `.replay` file here", type=["replay"])
 
-if uploaded_replay and st.button("🚀 Analyze Replay Now", type="primary"):
-    if not ballchasing_token or not gemini_api_key:
-        st.warning("Please provide both API keys in the sidebar.")
-    else:
-        replay_bytes = uploaded_replay.read()
-        report = process_replay_and_analyze(replay_bytes, uploaded_replay.name, player_rank, ballchasing_token, gemini_api_key)
-        if report:
-            st.subheader("📋 AI Coaching Analysis")
-            st.markdown(report)
+if uploaded_replay is not None:
+    st.success(f"File loaded: **{uploaded_replay.name}**")
+    
+    if st.button("🚀 Analyze Replay Now", type="primary", use_container_width=True):
+        if not gemini_api_key:
+            st.warning("Please enter your Gemini API Key in the sidebar or save it in Streamlit Secrets.")
+        else:
+            with st.spinner("Parsing binary replay & generating AI coaching report..."):
+                file_bytes = uploaded_replay.read()
+                telemetry = parse_replay_locally(file_bytes)
+                
+                if telemetry:
+                    report = generate_coaching_report(telemetry, player_rank, target_player, gemini_api_key)
+                    st.subheader("📋 AI Coaching Analysis")
+                    st.markdown(report)

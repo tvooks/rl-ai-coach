@@ -37,8 +37,11 @@ class SafeRLReplayParser:
         if not length_bytes:
             return ""
         length = struct.unpack("<i", length_bytes)[0]
-        if length == 0:
+        
+        # Sanity check: prevent memory allocation crashes on corrupted lengths
+        if length == 0 or abs(length) > 10000:
             return ""
+            
         if length > 0:
             val_bytes = self.safe_read(length)
             if not val_bytes:
@@ -76,19 +79,22 @@ class SafeRLReplayParser:
                     val = self.safe_read(1)
                     props[name] = bool(val[0]) if val else False
                 elif type_name == "ByteProperty":
-                    _enum = self.read_string()
-                    val = self.read_string()
-                    props[name] = val
+                    enum_name = self.read_string()
+                    if enum_name == "None" or not enum_name:
+                        b = self.safe_read(1)
+                        props[name] = b[0] if b else 0
+                    else:
+                        props[name] = self.read_string()
                 elif type_name == "ArrayProperty":
                     count = self.read_int32()
                     arr = []
-                    for _ in range(min(count, 200)):
+                    for _ in range(max(0, min(count, 200))):
                         elem = self.parse_properties()
-                        if elem:
+                        if elem is not None:
                             arr.append(elem)
                     props[name] = arr
                 else:
-                    if size > 0:
+                    if 0 < size < 10_000_000:
                         self.safe_read(size)
             except Exception:
                 break
@@ -126,7 +132,6 @@ def generate_coaching_report(telemetry_data, rank, target_name, api_key):
     
     player_focus = f"Focus particularly on analyzing player '{target_name}'." if target_name else "Analyze the main players in the match."
     
-    # ensure_ascii=True forces json.dumps to escape non-ASCII characters like \u26bd into clean ASCII text
     telemetry_json = json.dumps(telemetry_data, indent=2, ensure_ascii=True, default=str)
     
     prompt = f"""
@@ -143,7 +148,7 @@ def generate_coaching_report(telemetry_data, rank, target_name, api_key):
     4. **Custom Training Plan:** Recommend 2-3 specific workshop maps or custom training concepts suitable for {rank}.
     """
     
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
     last_error = None
     
     for model in models_to_try:
@@ -153,7 +158,8 @@ def generate_coaching_report(telemetry_data, rank, target_name, api_key):
                     model=model,
                     contents=prompt
                 )
-                return response.text
+                if response and response.text:
+                    return response.text
             except Exception as e:
                 last_error = e
                 time.sleep(1)
@@ -172,7 +178,8 @@ if uploaded_file is not None:
         else:
             with st.spinner("Parsing binary `.replay` header..."):
                 try:
-                    file_bytes = uploaded_file.read()
+                    # Fix: getvalue() ensures repeated reads don't return empty bytes
+                    file_bytes = uploaded_file.getvalue()
                     parser = SafeRLReplayParser(file_bytes)
                     replay_metadata = parser.parse_header()
                     

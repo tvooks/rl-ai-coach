@@ -38,7 +38,6 @@ class SafeRLReplayParser:
             return ""
         length = struct.unpack("<i", length_bytes)[0]
         
-        # Sanity check: prevent memory allocation crashes on corrupted lengths
         if length == 0 or abs(length) > 10000:
             return ""
             
@@ -148,7 +147,8 @@ def generate_coaching_report(telemetry_data, rank, target_name, api_key):
     4. **Custom Training Plan:** Recommend 2-3 specific workshop maps or custom training concepts suitable for {rank}.
     """
     
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    # Updated to latest active models
+    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
     last_error = None
     
     for model in models_to_try:
@@ -178,7 +178,6 @@ if uploaded_file is not None:
         else:
             with st.spinner("Parsing binary `.replay` header..."):
                 try:
-                    # Fix: getvalue() ensures repeated reads don't return empty bytes
                     file_bytes = uploaded_file.getvalue()
                     parser = SafeRLReplayParser(file_bytes)
                     replay_metadata = parser.parse_header()

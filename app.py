@@ -5,80 +5,101 @@ import struct
 import io
 from google import genai
 
-# --- PURE PYTHON ROCKET LEAGUE REPLAY PARSER ---
-class RLReplayParser:
+# --- SAFE PURE PYTHON ROCKET LEAGUE REPLAY PARSER ---
+class SafeRLReplayParser:
     def __init__(self, data: bytes):
         self.stream = io.BytesIO(data)
 
+    def safe_read(self, n: int):
+        b = self.stream.read(n)
+        if len(b) < n:
+            return None
+        return b
+
     def read_int32(self):
-        return struct.unpack("<i", self.stream.read(4))[0]
+        b = self.safe_read(4)
+        return struct.unpack("<i", b)[0] if b else 0
 
     def read_uint32(self):
-        return struct.unpack("<I", self.stream.read(4))[0]
+        b = self.safe_read(4)
+        return struct.unpack("<I", b)[0] if b else 0
 
     def read_uint64(self):
-        return struct.unpack("<Q", self.stream.read(8))[0]
+        b = self.safe_read(8)
+        return struct.unpack("<Q", b)[0] if b else 0
 
     def read_float32(self):
-        return struct.unpack("<f", self.stream.read(4))[0]
+        b = self.safe_read(4)
+        return struct.unpack("<f", b)[0] if b else 0.0
 
     def read_string(self):
-        length_data = self.stream.read(4)
-        if not length_data or len(length_data) < 4:
+        length_bytes = self.safe_read(4)
+        if not length_bytes:
             return ""
-        length = struct.unpack("<i", length_data)[0]
+        length = struct.unpack("<i", length_bytes)[0]
         if length == 0:
             return ""
         if length > 0:
-            val_bytes = self.stream.read(length)
-            return val_bytes[:-1].decode("utf-8", errors="ignore")
+            val_bytes = self.safe_read(length)
+            return val_bytes[:-1].decode("utf-8", errors="ignore") if val_bytes else ""
         else:
-            val_bytes = self.stream.read(-length * 2)
-            return val_bytes[:-2].decode("utf-16le", errors="ignore")
+            val_bytes = self.safe_read(-length * 2)
+            return val_bytes[:-2].decode("utf-16le", errors="ignore") if val_bytes else ""
 
     def parse_properties(self):
         props = {}
         while True:
-            name = self.read_string()
-            if not name or name == "None":
+            try:
+                name = self.read_string()
+                if not name or name == "None":
+                    break
+                type_name = self.read_string()
+                size = self.read_uint64()
+                
+                if type_name == "IntProperty":
+                    props[name] = self.read_int32()
+                elif type_name in ["StrProperty", "NameProperty"]:
+                    props[name] = self.read_string()
+                elif type_name == "FloatProperty":
+                    props[name] = round(self.read_float32(), 2)
+                elif type_name == "QWordProperty":
+                    props[name] = self.read_uint64()
+                elif type_name == "BoolProperty":
+                    val = self.safe_read(1)
+                    props[name] = bool(val[0]) if val else False
+                elif type_name == "ByteProperty":
+                    _enum = self.read_string()
+                    val = self.read_string()
+                    props[name] = val
+                elif type_name == "ArrayProperty":
+                    count = self.read_int32()
+                    arr = []
+                    # Cap array size safety limit
+                    for _ in range(min(count, 200)):
+                        elem = self.parse_properties()
+                        if elem:
+                            arr.append(elem)
+                    props[name] = arr
+                else:
+                    if size > 0:
+                        self.safe_read(size)
+            except Exception:
+                # Safely exit property loop if an unhandled format byte is reached
                 break
-            type_name = self.read_string()
-            size = self.read_uint64()
-            
-            if type_name == "IntProperty":
-                props[name] = self.read_int32()
-            elif type_name in ["StrProperty", "NameProperty"]:
-                props[name] = self.read_string()
-            elif type_name == "FloatProperty":
-                props[name] = round(self.read_float32(), 2)
-            elif type_name == "QWordProperty":
-                props[name] = self.read_uint64()
-            elif type_name == "BoolProperty":
-                val = self.stream.read(1)
-                props[name] = bool(val[0]) if val else False
-            elif type_name == "ByteProperty":
-                _enum_type = self.read_string()
-                enum_val = self.read_string()
-                props[name] = enum_val
-            elif type_name == "ArrayProperty":
-                count = self.read_int32()
-                arr = []
-                for _ in range(count):
-                    arr.append(self.parse_properties())
-                props[name] = arr
-            else:
-                self.stream.read(size)
         return props
 
     def parse_header(self):
-        _header_size = self.read_uint32()
-        _crc = self.read_uint32()
-        engine_ver = self.read_uint32()
-        licensee_ver = self.read_uint32()
-        if engine_ver >= 868 and licensee_ver >= 18:
-            _net_ver = self.read_uint32()
-        _replay_type = self.read_string()
-        return self.parse_properties()
+        try:
+            _header_size = self.read_uint32()
+            _crc = self.read_uint32()
+            engine_ver = self.read_uint32()
+            licensee_ver = self.read_uint32()
+            if engine_ver >= 868 and licensee_ver >= 18:
+                _net_ver = self.read_uint32()
+            _replay_type = self.read_string()
+            return self.parse_properties()
+        except Exception as e:
+            return {"parsing_error": str(e)}
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Rocket League AI Coach", page_icon="⚽", layout="centered")
@@ -103,7 +124,7 @@ def generate_coaching_report(telemetry_data, rank, target_name, api_key):
     You are an elite Rocket League Coach evaluating a {rank} player match.
     {player_focus}
     
-    Match Metadata from Rocket League Replay:
+    Match Metadata from Rocket League Replay Header:
     {json.dumps(telemetry_data, indent=2, default=str)}
 
     Provide a structured coaching report following this format:
@@ -143,7 +164,7 @@ if uploaded_file is not None:
             with st.spinner("Parsing binary `.replay` header..."):
                 try:
                     file_bytes = uploaded_file.read()
-                    parser = RLReplayParser(file_bytes)
+                    parser = SafeRLReplayParser(file_bytes)
                     replay_metadata = parser.parse_header()
                     
                     with st.spinner("Generating AI coaching report with Gemini..."):

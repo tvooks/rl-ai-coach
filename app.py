@@ -41,10 +41,18 @@ class SafeRLReplayParser:
             return ""
         if length > 0:
             val_bytes = self.safe_read(length)
-            return val_bytes[:-1].decode("utf-8", errors="ignore") if val_bytes else ""
+            if not val_bytes:
+                return ""
+            if val_bytes.endswith(b'\x00'):
+                val_bytes = val_bytes[:-1]
+            return val_bytes.decode("utf-8", errors="replace")
         else:
             val_bytes = self.safe_read(-length * 2)
-            return val_bytes[:-2].decode("utf-16le", errors="ignore") if val_bytes else ""
+            if not val_bytes:
+                return ""
+            if val_bytes.endswith(b'\x00\x00'):
+                val_bytes = val_bytes[:-2]
+            return val_bytes.decode("utf-16le", errors="replace")
 
     def parse_properties(self):
         props = {}
@@ -74,7 +82,6 @@ class SafeRLReplayParser:
                 elif type_name == "ArrayProperty":
                     count = self.read_int32()
                     arr = []
-                    # Cap array size safety limit
                     for _ in range(min(count, 200)):
                         elem = self.parse_properties()
                         if elem:
@@ -84,7 +91,6 @@ class SafeRLReplayParser:
                     if size > 0:
                         self.safe_read(size)
             except Exception:
-                # Safely exit property loop if an unhandled format byte is reached
                 break
         return props
 
@@ -120,12 +126,15 @@ def generate_coaching_report(telemetry_data, rank, target_name, api_key):
     
     player_focus = f"Focus particularly on analyzing player '{target_name}'." if target_name else "Analyze the main players in the match."
     
+    # ensure_ascii=True forces json.dumps to escape non-ASCII characters like \u26bd into clean ASCII text
+    telemetry_json = json.dumps(telemetry_data, indent=2, ensure_ascii=True, default=str)
+    
     prompt = f"""
     You are an elite Rocket League Coach evaluating a {rank} player match.
     {player_focus}
     
     Match Metadata from Rocket League Replay Header:
-    {json.dumps(telemetry_data, indent=2, default=str)}
+    {telemetry_json}
 
     Provide a structured coaching report following this format:
     1. **Primary Tactical Error:** What core mistake is holding them back in {rank}?
